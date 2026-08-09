@@ -71,14 +71,12 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(401, {"error": "unauthorized"})
             return
 
-        # 先尝试解析请求体，获取 id
+        # 1. 解析请求体
         try:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
             message = json.loads(raw)
         except Exception as parse_err:
-            # 如果连解析都失败，但请求没有 id，则不返回任何响应
-            # 这里直接返回 400 错误，但仅当请求看起来像有 id 才返回
             self._send_json(
                 400,
                 {
@@ -89,11 +87,11 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # 处理请求，可能抛出异常
+        # 2. 交给 MCP 核心处理
         try:
-            response = self.server.mcp.handle(message)  # type: ignore[attr-defined]
+            response = self.server.mcp.handle(message)
         except Exception as handle_err:
-            # 处理过程中出错，仅当请求有 id 时才返回错误响应
+            # 处理出错
             if message.get("id") is not None:
                 self._send_json(
                     400,
@@ -103,14 +101,22 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
                         "error": {"code": -32603, "message": str(handle_err)},
                     },
                 )
-            # 否则（通知）直接忽略错误，不返回任何内容
+            else:
+                # 通知处理失败：发送 202 表示已收到，但不处理具体内容
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             return
 
-        # 处理成功：如果是通知（无 id），不需要返回响应
+        # 3. 处理成功，判断是否为通知（无 id）
         if message.get("id") is None:
+            # ✅ 关键修复：必须正确结束 HTTP 事务，返回 204 No Content
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
 
-        # 有 id：必须返回响应
+        # 4. 有 id，正常返回 JSON-RPC 响应
         if response is None:
             response = {"jsonrpc": "2.0", "result": None, "id": message.get("id")}
         self._send_json(200, response)
