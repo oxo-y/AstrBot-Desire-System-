@@ -70,23 +70,50 @@ class DesireMCPHTTPHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
             return
+
+        # 先尝试解析请求体，获取 id
         try:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8")
             message = json.loads(raw)
-            response = self.server.mcp.handle(message)  # type: ignore[attr-defined]
-            if response is None:
-                response = {"jsonrpc": "2.0", "result": None, "id": message.get("id")}
-            self._send_json(200, response)
-        except Exception as exc:
+        except Exception as parse_err:
+            # 如果连解析都失败，但请求没有 id，则不返回任何响应
+            # 这里直接返回 400 错误，但仅当请求看起来像有 id 才返回
             self._send_json(
                 400,
                 {
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {"code": -32700, "message": str(exc)},
+                    "error": {"code": -32700, "message": f"Parse error: {parse_err}"},
                 },
             )
+            return
+
+        # 处理请求，可能抛出异常
+        try:
+            response = self.server.mcp.handle(message)  # type: ignore[attr-defined]
+        except Exception as handle_err:
+            # 处理过程中出错，仅当请求有 id 时才返回错误响应
+            if message.get("id") is not None:
+                self._send_json(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "error": {"code": -32603, "message": str(handle_err)},
+                    },
+                )
+            # 否则（通知）直接忽略错误，不返回任何内容
+            return
+
+        # 处理成功：如果是通知（无 id），不需要返回响应
+        if message.get("id") is None:
+            return
+
+        # 有 id：必须返回响应
+        if response is None:
+            response = {"jsonrpc": "2.0", "result": None, "id": message.get("id")}
+        self._send_json(200, response)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if os.environ.get("DESIRE_MCP_LOG", ""):
